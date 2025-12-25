@@ -1,0 +1,13 @@
+# Relay - Dependencies
+# Updated incrementally as we build each micro-step
+
+# Web framework
+fastapi==0.109.0
+
+# ASGI server to run FastAPI
+uvicorn[standard]==0.27.0
+
+# Environment variables & configuration (Micro-Step 2)
+python-dotenv==1.0.0
+pydantic-settings==2.1.0
+
