@@ -23,9 +23,9 @@ class Settings(BaseSettings):
     debug: bool = True
     port: int = 8000
     
-    # Slack (empty for now, we'll use these in Micro-Step 5)
+    # Slack (Micro-Step 4 & 5)
     slack_bot_token: Optional[str] = None
-    slack_signing_secret: Optional[str] = None
+    slack_signing_secret: Optional[str] = None  # For verifying requests from Slack
     
     # n8n (will use in Step 2)
     n8n_api_url: Optional[str] = None

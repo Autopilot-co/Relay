@@ -3,9 +3,10 @@ Relay - AI Assistant for Workflow Automation
 Main FastAPI application entry point
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from config.settings import settings
 from utils.logger import logger
+from webhooks.slack_webhook import handle_slack_webhook
 
 # Log that we're starting up
 logger.info(f"Initializing {settings.app_name}...")
@@ -53,6 +54,42 @@ async def root():
         "status": "operational",
         "version": "0.1.0"
     }
+
+
+@app.post("/webhooks/slack")
+async def slack_webhook(request: Request):
+    """
+    Slack webhook endpoint - receives events from Slack
+    
+    This is where Slack sends:
+    - Messages from users
+    - App mentions (@bot)
+    - Other events
+    
+    Production features:
+    - Challenge verification (Slack setup)
+    - Signature verification (security)
+    - Async processing (fast response)
+    
+    Args:
+        request: The incoming request from Slack
+        
+    Returns:
+        dict: Response for Slack
+    """
+    logger.info("Slack webhook called")
+    
+    try:
+        response = await handle_slack_webhook(
+            request=request,
+            signing_secret=settings.slack_signing_secret or "",
+            bot_token=settings.slack_bot_token
+        )
+        return response
+    except Exception as e:
+        logger.error(f"Error handling Slack webhook: {e}")
+        # Return 200 even on error (so Slack doesn't retry)
+        return {"ok": False, "error": str(e)}
 
 
 # Entry point for running with python main.py

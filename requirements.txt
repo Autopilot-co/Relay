@@ -11,3 +11,6 @@ uvicorn[standard]==0.27.0
 python-dotenv==1.0.0
 pydantic-settings==2.1.0
 
+# Slack integration (Micro-Step 4 & 5)
+slack-sdk==3.26.2
+
