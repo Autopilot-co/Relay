@@ -4,7 +4,8 @@ Handles all AI/LLM interactions using Cerebras (via OpenAI SDK)
 """
 
 import logging
-from typing import AsyncGenerator, Optional
+import re
+from typing import AsyncGenerator, Optional, Tuple
 from openai import AsyncOpenAI
 from config.settings import settings
 
@@ -42,9 +43,9 @@ class AIEngine:
         """
         System prompt that defines Relay's personality and capabilities
 
-        This tells the AI how to behave as Relay - a DevOps engineer for n8n
+        This tells the AI how to behave as Relay - an AI DevOps engineer
         """
-        return """You are Relay, an AI DevOps engineer specializing in n8n workflow automation.
+        return """You are Relay, an AI DevOps engineer specializing in workflow automation and AI agents.
 
 Your personality:
 - Friendly and conversational (use "hey", "yeah", "cool", casual language)
@@ -52,23 +53,227 @@ Your personality:
 - Clear and concise (explain technical things in plain English)
 - Professional but not robotic (you're a teammate, not a command-line tool)
 
-Your capabilities (what you'll be able to do):
-- Monitor n8n workflows 24/7
+Your capabilities:
+- List workflows and check their status
+- Get execution history and analyze failures
+- Monitor workflow and AI agent performance
 - Explain errors in plain English
-- Fix common workflow issues
-- Build new workflows from descriptions
-- Optimize workflow performance
-- Answer questions about workflows
+- Build new workflows and AI agents (MUST ask clarifying questions first)
+- Update existing automations (MUST ask clarifying questions first)
+- Optimize workflows based on execution patterns
 
-Current phase: Basic conversation (n8n integration coming soon)
+CRITICAL RULES - When to Ask vs When to Act:
+
+READ-ONLY OPERATIONS (Just do it, no questions needed):
+- Listing workflows: "show me my workflows" → Just list them
+- Checking status: "what's running?" → Just check executions
+- Monitoring: "any failures?" → Just check and report
+- Explaining errors: "why did X fail?" → Analyze and explain
+- Optimization suggestions: "can this be faster?" → Analyze and suggest
+
+WRITE OPERATIONS (ALWAYS ask clarifying questions first):
+- Building workflows: "create a workflow to backup my database"
+  → Ask: What database? How often? Where to backup? Then build
+- Updating workflows: "add error handling to workflow X"
+  → Ask: What kind of errors? How to handle? Then update
+- Modifying workflows: "change the schedule to daily"
+  → Confirm: Which workflow? What time? Then modify
+
+Why this matters: Read operations are safe. Write operations are destructive and expensive - you MUST understand exactly what the user wants before building anything.
+
+CRITICAL: ASK ONE QUESTION AT A TIME!
+- DO NOT list multiple questions at once
+- Ask the MOST important question first
+- Wait for answer before asking next question
+- This creates natural conversation flow
+
+Example - WRONG ❌:
+User: "build me a lead generation workflow"
+You: "I can help! A few questions:
+- Where should I get leads from? (LinkedIn, Reddit, etc.)
+- What data do you need? (email, phone, etc.)
+- How often should it run?
+- Where should results go?"
+
+Example - CORRECT ✅:
+User: "build me a lead generation workflow"
+You: "Perfect! Let's build that. Where would you like to generate leads from? (LinkedIn, Reddit, or another platform?)"
+
+User: "LinkedIn"
+You: "Great choice! What information do you want to collect? (emails, phone numbers, company info, etc.)"
+
+User: "email and phone both"
+You: "Got it! How often should this run? (hourly, daily, weekly?)"
+
+...and so on until you have all info, THEN build the workflow.
+
+Function calling format:
+When you need to call a function, use this format in your response:
+[CALL:function_name:param1:param2]
+
+Available functions:
+- [CALL:list_workflows] - List all workflows and automations
+- [CALL:list_workflows:active] - List only active workflows
+- [CALL:get_workflow:WORKFLOW_ID] - Get specific workflow details
+- [CALL:get_executions] - Get recent execution history (all workflows)
+- [CALL:get_executions:WORKFLOW_ID] - Get executions for specific workflow
+- [CALL:activate_workflow:WORKFLOW_ID] - Activate a workflow
+- [CALL:deactivate_workflow:WORKFLOW_ID] - Deactivate a workflow
+
+Example conversation:
+User: "show me my workflows"
+You: "Let me check your workflows for you. [CALL:list_workflows]"
+
+User: "why did workflow X fail?"
+You: "Let me check the execution history. [CALL:get_executions:X]"
+
+User: "build a workflow to send me daily reports"
+You: "I can help with that! A few questions first:
+- What kind of reports? (sales, analytics, system status, etc.)
+- What data source should I pull from?
+- What time should they send?
+- Where should I send them? (email, slack, etc.)"
 
 Communication style:
 - Use emojis sparingly for status (✅ ❌ ⚠️ 🔍)
 - Be conversational, not formal
-- Ask clarifying questions when needed
+- Always explain what you're doing before calling functions
 - Give context with your answers
 
 Remember: You're a DevOps engineer teammate who happens to work in Slack, not a chatbot."""
+
+    def _parse_function_calls(self, text: str) -> list[Tuple[str, str, list[str]]]:
+        """
+        Parse function call markers from AI response
+
+        Format: [CALL:function_name:param1:param2]
+
+        Returns:
+            List of tuples: (full_match, function_name, [params])
+        """
+        pattern = r'\[CALL:([^\]]+)\]'
+        matches = re.finditer(pattern, text)
+
+        calls = []
+        for match in matches:
+            full_match = match.group(0)
+            call_parts = match.group(1).split(':')
+            function_name = call_parts[0]
+            params = call_parts[1:] if len(call_parts) > 1 else []
+            calls.append((full_match, function_name, params))
+
+        return calls
+
+    async def _execute_function_call(self, function_name: str, params: list[str]) -> str:
+        """
+        Execute an n8n function call and return formatted result
+
+        Args:
+            function_name: Name of the function to call
+            params: List of parameters for the function
+
+        Returns:
+            Formatted string with function results
+        """
+        # Import here to avoid circular dependency
+        from core.n8n_client import n8n_client
+
+        try:
+            # List all workflows
+            if function_name == "list_workflows":
+                active_only = len(params) > 0 and params[0] == "active"
+                workflows = await n8n_client.list_workflows(active_only=active_only)
+
+                if not workflows:
+                    return "\n📋 No workflows found."
+
+                result = f"\n📋 **Your Workflows** ({len(workflows)} total):\n"
+                for wf in workflows:
+                    status = "✅ Active" if wf.get("active") else "⚪ Inactive"
+                    name = wf.get("name", "Unnamed")
+                    wf_id = wf.get("id", "unknown")
+                    result += f"  • {name} - {status} (ID: {wf_id})\n"
+
+                return result
+
+            # Get specific workflow
+            elif function_name == "get_workflow":
+                if not params:
+                    return "\n❌ Error: Missing workflow ID"
+
+                workflow_id = params[0]
+                workflow = await n8n_client.get_workflow(workflow_id)
+
+                if not workflow:
+                    return f"\n❌ Workflow {workflow_id} not found"
+
+                name = workflow.get("name", "Unnamed")
+                active = "✅ Active" if workflow.get("active") else "⚪ Inactive"
+                nodes_count = len(workflow.get("nodes", []))
+
+                result = f"\n📄 **Workflow: {name}**\n"
+                result += f"  • Status: {active}\n"
+                result += f"  • Nodes: {nodes_count}\n"
+                result += f"  • ID: {workflow_id}\n"
+
+                return result
+
+            # Get executions
+            elif function_name == "get_executions":
+                workflow_id = params[0] if params else None
+                executions = await n8n_client.get_executions(workflow_id=workflow_id, limit=10)
+
+                if not executions:
+                    return "\n📊 No executions found."
+
+                result = f"\n📊 **Recent Executions** ({len(executions)} shown):\n"
+                for exe in executions[:5]:  # Show top 5
+                    status = exe.get("status", "unknown")
+                    status_icon = "✅" if status == "success" else "❌" if status == "error" else "⏸️"
+                    wf_name = exe.get("workflowName", "Unknown workflow")
+                    started = exe.get("startedAt", "Unknown time")
+
+                    result += f"  {status_icon} {wf_name} - {status}\n"
+                    result += f"     Started: {started}\n"
+
+                    if status == "error" and exe.get("error"):
+                        error_msg = exe.get("error", {}).get("message", "Unknown error")
+                        result += f"     Error: {error_msg[:100]}...\n"
+
+                return result
+
+            # Activate workflow
+            elif function_name == "activate_workflow":
+                if not params:
+                    return "\n❌ Error: Missing workflow ID"
+
+                workflow_id = params[0]
+                success = await n8n_client.activate_workflow(workflow_id)
+
+                if success:
+                    return f"\n✅ Activated workflow {workflow_id}"
+                else:
+                    return f"\n❌ Failed to activate workflow {workflow_id}"
+
+            # Deactivate workflow
+            elif function_name == "deactivate_workflow":
+                if not params:
+                    return "\n❌ Error: Missing workflow ID"
+
+                workflow_id = params[0]
+                success = await n8n_client.deactivate_workflow(workflow_id)
+
+                if success:
+                    return f"\n⚪ Deactivated workflow {workflow_id}"
+                else:
+                    return f"\n❌ Failed to deactivate workflow {workflow_id}"
+
+            else:
+                return f"\n❌ Unknown function: {function_name}"
+
+        except Exception as e:
+            logger.error(f"Error executing {function_name}: {e}")
+            return f"\n❌ Error executing {function_name}: {str(e)}"
 
     async def process_message(
         self,
@@ -77,13 +282,14 @@ Remember: You're a DevOps engineer teammate who happens to work in Slack, not a 
     ) -> str:
         """
         Process a user message and return AI response
+        Automatically executes any function calls requested by the AI
 
         Args:
             user_message: The message from the user
             conversation_history: Optional list of previous messages for context
 
         Returns:
-            AI's response as a string
+            AI's response as a string (with function results embedded)
         """
         if not self.client:
             return "Sorry, AI features are not configured. Please set CEREBRAS_API_KEY."
@@ -110,13 +316,29 @@ Remember: You're a DevOps engineer teammate who happens to work in Slack, not a 
                 max_completion_tokens=self.max_tokens,
                 temperature=self.temperature,
                 reasoning_effort=self.reasoning_effort,
-                stream=False  # Start with non-streaming for simplicity
+                stream=False
             )
 
             # Extract response
             ai_response = response.choices[0].message.content
 
             logger.info(f"AI response generated ({len(ai_response)} chars)")
+
+            # Parse and execute function calls
+            function_calls = self._parse_function_calls(ai_response)
+
+            if function_calls:
+                logger.info(f"Found {len(function_calls)} function call(s) to execute")
+
+                # Execute each function call and replace in response
+                for full_match, function_name, params in function_calls:
+                    logger.info(f"Executing: {function_name}({', '.join(params)})")
+
+                    # Execute the function
+                    result = await self._execute_function_call(function_name, params)
+
+                    # Replace the marker with the result
+                    ai_response = ai_response.replace(full_match, result)
 
             return ai_response
 

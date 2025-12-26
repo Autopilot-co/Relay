@@ -7,6 +7,7 @@ Production-ready features:
 - Signature verification (security)
 - Async processing (fast responses)
 - Proper error handling
+- Conversation history tracking
 """
 
 import hmac
@@ -15,8 +16,12 @@ import time
 from fastapi import Request, HTTPException
 from utils.logger import logger
 from platforms.slack_handler import get_slack_handler
-from core.ai_engine import ai_engine
-from typing import Optional
+from typing import Optional, Dict, List
+
+# In-memory conversation storage
+# Key: f"{channel}:{thread_ts}" (thread_ts for threaded convos, or message ts for new threads)
+# Value: List of message dicts [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+conversation_history: Dict[str, List[Dict[str, str]]] = {}
 
 
 async def verify_slack_signature(request: Request, signing_secret: str) -> bool:
@@ -149,39 +154,48 @@ async def handle_slack_webhook(
             
             # Log the message
             logger.info(f"Message from user {user} in channel {channel}: {text}")
-
+            
             # ----------------------------------------------------------------
-            # AI-POWERED RESPONSE: Use Relay AI engine
+            # AI-POWERED RESPONSES: Use Relay AI engine with conversation memory
             # ----------------------------------------------------------------
 
             if bot_token:
                 try:
-                    # Get Slack handler
+                    # Get Slack handler and AI engine
                     slack = get_slack_handler(bot_token)
+                    from core.ai_engine import ai_engine
 
-                    # Process message through AI engine
-                    ai_response = await ai_engine.process_message(text)
+                    # Create conversation key (channel + thread)
+                    # Use thread_ts if in a thread, otherwise start new thread with this message
+                    thread_id = event.get("thread_ts", ts)
+                    conv_key = f"{channel}:{thread_id}"
 
-                    # Send AI response back to Slack (in thread to keep it organized)
+                    # Get existing conversation history
+                    history = conversation_history.get(conv_key, [])
+
+                    # Process message with AI (includes conversation context)
+                    ai_response = await ai_engine.process_message(text, conversation_history=history)
+
+                    # Update conversation history
+                    history.append({"role": "user", "content": text})
+                    history.append({"role": "assistant", "content": ai_response})
+                    conversation_history[conv_key] = history
+
+                    # Keep only last 20 messages (10 exchanges) to avoid token limits
+                    if len(conversation_history[conv_key]) > 20:
+                        conversation_history[conv_key] = conversation_history[conv_key][-20:]
+
+                    # Send AI response back to Slack (in main channel)
                     await slack.send_message(
                         channel=channel,
-                        text=ai_response,
-                        thread_ts=ts  # Reply in thread
+                        text=ai_response
+                        # No thread_ts = reply in main channel like Discord
                     )
 
-                    logger.info("AI response sent successfully")
+                    logger.info(f"AI response sent successfully (conv_key: {conv_key}, history: {len(history)} messages)")
 
                 except Exception as e:
                     logger.error(f"Failed to send AI response: {e}")
-                    # Send error message to user
-                    try:
-                        await slack.send_message(
-                            channel=channel,
-                            text=f"Sorry, I encountered an error: {str(e)}",
-                            thread_ts=ts
-                        )
-                    except:
-                        pass  # If we can't send error message, just log it
             else:
                 logger.warning("Bot token not configured, cannot send response")
             
@@ -195,25 +209,41 @@ async def handle_slack_webhook(
             ts = event.get("ts", "")
             
             logger.info(f"Mentioned by user {user} in channel {channel}: {text}")
-
+            
             # ----------------------------------------------------------------
-            # MENTION RESPONSE: Bot was @mentioned, use AI
+            # MENTION RESPONSE: Bot was @mentioned - use AI with conversation memory
             # ----------------------------------------------------------------
 
             if bot_token:
                 try:
                     slack = get_slack_handler(bot_token)
+                    from core.ai_engine import ai_engine
 
-                    # Process mention through AI engine
-                    ai_response = await ai_engine.process_message(text)
+                    # Create conversation key (use channel since we're not threading)
+                    conv_key = f"{channel}:main"
+
+                    # Get existing conversation history
+                    history = conversation_history.get(conv_key, [])
+
+                    # Process mention with AI
+                    ai_response = await ai_engine.process_message(text, conversation_history=history)
+
+                    # Update conversation history
+                    history.append({"role": "user", "content": text})
+                    history.append({"role": "assistant", "content": ai_response})
+                    conversation_history[conv_key] = history
+
+                    # Keep only last 20 messages
+                    if len(conversation_history[conv_key]) > 20:
+                        conversation_history[conv_key] = conversation_history[conv_key][-20:]
 
                     await slack.send_message(
                         channel=channel,
-                        text=ai_response,
-                        thread_ts=ts
+                        text=ai_response
+                        # No thread_ts = reply in main channel
                     )
 
-                    logger.info("AI mention response sent successfully")
+                    logger.info(f"Mention response sent successfully (conv_key: {conv_key}, history: {len(history)} messages)")
 
                 except Exception as e:
                     logger.error(f"Failed to send mention response: {e}")

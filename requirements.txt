@@ -17,3 +17,6 @@ slack-sdk==3.26.2
 # AI integration (Phase 2 - Cerebras/OpenAI)
 openai==1.58.1
 
+# HTTP client for n8n API (Phase 2 - n8n integration)
+httpx==0.27.0
+
