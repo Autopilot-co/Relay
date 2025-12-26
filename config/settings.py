@@ -31,7 +31,8 @@ class Settings(BaseSettings):
     n8n_api_url: Optional[str] = None
     n8n_api_key: Optional[str] = None
     
-    # LLM APIs (will use in Step 3)
+    # LLM APIs (Phase 2)
+    cerebras_api_key: Optional[str] = None
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     

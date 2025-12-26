@@ -14,3 +14,6 @@ pydantic-settings==2.1.0
 # Slack integration (Micro-Step 4 & 5)
 slack-sdk==3.26.2
 
+# AI integration (Phase 2 - Cerebras/OpenAI)
+openai==1.58.1
+

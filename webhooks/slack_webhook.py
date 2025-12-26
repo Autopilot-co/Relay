@@ -15,6 +15,7 @@ import time
 from fastapi import Request, HTTPException
 from utils.logger import logger
 from platforms.slack_handler import get_slack_handler
+from core.ai_engine import ai_engine
 from typing import Optional
 
 
@@ -148,31 +149,39 @@ async def handle_slack_webhook(
             
             # Log the message
             logger.info(f"Message from user {user} in channel {channel}: {text}")
-            
+
             # ----------------------------------------------------------------
-            # ECHO BOT: Reply with what the user said
+            # AI-POWERED RESPONSE: Use Relay AI engine
             # ----------------------------------------------------------------
-            # TODO (Later): Replace this with AI-powered responses
-            
+
             if bot_token:
                 try:
                     # Get Slack handler
                     slack = get_slack_handler(bot_token)
-                    
-                    # Create echo response
-                    response_text = f"You said: {text}"
-                    
-                    # Send response back to Slack (in thread to keep it organized)
+
+                    # Process message through AI engine
+                    ai_response = await ai_engine.process_message(text)
+
+                    # Send AI response back to Slack (in thread to keep it organized)
                     await slack.send_message(
                         channel=channel,
-                        text=response_text,
+                        text=ai_response,
                         thread_ts=ts  # Reply in thread
                     )
-                    
-                    logger.info("Echo response sent successfully")
-                    
+
+                    logger.info("AI response sent successfully")
+
                 except Exception as e:
-                    logger.error(f"Failed to send echo response: {e}")
+                    logger.error(f"Failed to send AI response: {e}")
+                    # Send error message to user
+                    try:
+                        await slack.send_message(
+                            channel=channel,
+                            text=f"Sorry, I encountered an error: {str(e)}",
+                            thread_ts=ts
+                        )
+                    except:
+                        pass  # If we can't send error message, just log it
             else:
                 logger.warning("Bot token not configured, cannot send response")
             
@@ -186,26 +195,26 @@ async def handle_slack_webhook(
             ts = event.get("ts", "")
             
             logger.info(f"Mentioned by user {user} in channel {channel}: {text}")
-            
+
             # ----------------------------------------------------------------
-            # MENTION RESPONSE: Bot was @mentioned
+            # MENTION RESPONSE: Bot was @mentioned, use AI
             # ----------------------------------------------------------------
-            
+
             if bot_token:
                 try:
                     slack = get_slack_handler(bot_token)
-                    
-                    # Friendly response when mentioned
-                    response_text = f"Hi! I'm Relay, your AI workflow assistant. You said: {text}"
-                    
+
+                    # Process mention through AI engine
+                    ai_response = await ai_engine.process_message(text)
+
                     await slack.send_message(
                         channel=channel,
-                        text=response_text,
+                        text=ai_response,
                         thread_ts=ts
                     )
-                    
-                    logger.info("Mention response sent successfully")
-                    
+
+                    logger.info("AI mention response sent successfully")
+
                 except Exception as e:
                     logger.error(f"Failed to send mention response: {e}")
             
