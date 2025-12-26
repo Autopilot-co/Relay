@@ -11,7 +11,6 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-
 class AIEngine:
     """
     AI Engine for Relay - handles conversations with users
@@ -43,9 +42,9 @@ class AIEngine:
         """
         System prompt that defines Relay's personality and capabilities
 
-        This tells the AI how to behave as Relay - an AI DevOps engineer
+        This tells the AI how to behave as Relay - a DevOps engineer for n8n
         """
-        return """You are Relay, an AI DevOps engineer specializing in workflow automation and AI agents.
+        return """You are Relay, an AI DevOps engineer specializing in n8n workflow automation.
 
 Your personality:
 - Friendly and conversational (use "hey", "yeah", "cool", casual language)
@@ -53,13 +52,13 @@ Your personality:
 - Clear and concise (explain technical things in plain English)
 - Professional but not robotic (you're a teammate, not a command-line tool)
 
-Your capabilities:
+Your n8n capabilities:
 - List workflows and check their status
 - Get execution history and analyze failures
-- Monitor workflow and AI agent performance
+- Monitor workflow performance
 - Explain errors in plain English
-- Build new workflows and AI agents (MUST ask clarifying questions first)
-- Update existing automations (MUST ask clarifying questions first)
+- Build new workflows (MUST ask clarifying questions first)
+- Update existing workflows (MUST ask clarifying questions first)
 - Optimize workflows based on execution patterns
 
 CRITICAL RULES - When to Ask vs When to Act:
@@ -108,17 +107,31 @@ You: "Got it! How often should this run? (hourly, daily, weekly?)"
 ...and so on until you have all info, THEN build the workflow.
 
 Function calling format:
-When you need to call a function, use this format in your response:
+When you need to call an n8n function, use this format in your response:
 [CALL:function_name:param1:param2]
 
 Available functions:
-- [CALL:list_workflows] - List all workflows and automations
+- [CALL:list_workflows] - List all workflows
 - [CALL:list_workflows:active] - List only active workflows
 - [CALL:get_workflow:WORKFLOW_ID] - Get specific workflow details
-- [CALL:get_executions] - Get recent execution history (all workflows)
+- [CALL:get_executions] - Get recent executions (all workflows)
 - [CALL:get_executions:WORKFLOW_ID] - Get executions for specific workflow
 - [CALL:activate_workflow:WORKFLOW_ID] - Activate a workflow
 - [CALL:deactivate_workflow:WORKFLOW_ID] - Deactivate a workflow
+- [CALL:create_workflow:DESCRIPTION] - Create new workflow (use after gathering ALL requirements)
+
+WORKFLOW GENERATION - n8n JSON Format:
+
+When I call create_workflow, I will ask you to generate valid n8n JSON. Use this structure:
+
+{
+  "name": "Workflow Name",
+  "nodes": [{"id": "node-1", "name": "Node Name", "type": "n8n-nodes-base.nodeType", "typeVersion": 1, "position": [250, 300], "parameters": {}}],
+  "connections": {"Node Name": {"main": [[{"node": "Next Node", "type": "main", "index": 0}]]}},
+  "active": false
+}
+
+Common node types: scheduleTrigger, webhook, httpRequest, code, if, set, respondToWebhook
 
 Example conversation:
 User: "show me my workflows"
@@ -267,6 +280,70 @@ Remember: You're a DevOps engineer teammate who happens to work in Slack, not a 
                     return f"\n⚪ Deactivated workflow {workflow_id}"
                 else:
                     return f"\n❌ Failed to deactivate workflow {workflow_id}"
+
+            # Create workflow - AI generates JSON
+            elif function_name == "create_workflow":
+                if not params:
+                    return "\n❌ Error: Missing workflow description"
+
+                description = " ".join(params)
+
+                try:
+                    # Ask AI to generate workflow JSON
+                    import json
+                    generation_prompt = f"""Generate valid n8n workflow JSON for: {description}
+
+Return ONLY the JSON, no explanations."""
+
+                    json_response = await self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": self._get_system_prompt()},
+                            {"role": "user", "content": generation_prompt}
+                        ],
+                        max_completion_tokens=self.max_tokens,
+                        temperature=0.3,
+                        stream=False
+                    )
+
+                    workflow_json_text = json_response.choices[0].message.content
+
+                    # Extract JSON
+                    if "```json" in workflow_json_text:
+                        workflow_json_text = workflow_json_text.split("```json")[1].split("```")[0].strip()
+                    elif "```" in workflow_json_text:
+                        workflow_json_text = workflow_json_text.split("```")[1].split("```")[0].strip()
+
+                    workflow_data = json.loads(workflow_json_text)
+
+                    # Create in n8n
+                    workflow = await n8n_client.create_workflow(workflow_data)
+
+                    if workflow:
+                        wf_id = workflow.get("id")
+                        wf_name = workflow.get("name")
+
+                        # Save workflow metadata to memory
+                        # Note: We don't have channel/user context here, will add later
+                        from core.memory import memory
+                        memory.save_workflow_built(
+                            workflow_id=wf_id,
+                            workflow_name=wf_name,
+                            description=description,
+                            channel="slack",  # Placeholder
+                            user="user"  # Placeholder
+                        )
+
+                        return f"\n✅ Created: {wf_name} (ID: {wf_id})\n💡 Review in n8n, add credentials, then activate!"
+                    else:
+                        return "\n❌ Failed to create workflow in n8n"
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"AI generated invalid JSON: {e}")
+                    return "\n❌ AI generated invalid JSON. Try simpler workflow."
+                except Exception as e:
+                    logger.error(f"Error creating workflow: {e}")
+                    return f"\n❌ Error: {str(e)}"
 
             else:
                 return f"\n❌ Unknown function: {function_name}"

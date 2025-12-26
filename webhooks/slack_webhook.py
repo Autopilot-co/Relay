@@ -18,10 +18,8 @@ from utils.logger import logger
 from platforms.slack_handler import get_slack_handler
 from typing import Optional, Dict, List
 
-# In-memory conversation storage
-# Key: f"{channel}:{thread_ts}" (thread_ts for threaded convos, or message ts for new threads)
-# Value: List of message dicts [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
-conversation_history: Dict[str, List[Dict[str, str]]] = {}
+# Import persistent memory system
+from core.memory import memory
 
 
 async def verify_slack_signature(request: Request, signing_secret: str) -> bool:
@@ -165,13 +163,11 @@ async def handle_slack_webhook(
                     slack = get_slack_handler(bot_token)
                     from core.ai_engine import ai_engine
 
-                    # Create conversation key (channel + thread)
-                    # Use thread_ts if in a thread, otherwise start new thread with this message
-                    thread_id = event.get("thread_ts", ts)
-                    conv_key = f"{channel}:{thread_id}"
+                    # Create conversation key (use channel since we're not threading)
+                    conv_key = f"{channel}:main"
 
-                    # Get existing conversation history
-                    history = conversation_history.get(conv_key, [])
+                    # Load conversation history from persistent storage
+                    history = memory.load_conversation(conv_key)
 
                     # Process message with AI (includes conversation context)
                     ai_response = await ai_engine.process_message(text, conversation_history=history)
@@ -179,11 +175,13 @@ async def handle_slack_webhook(
                     # Update conversation history
                     history.append({"role": "user", "content": text})
                     history.append({"role": "assistant", "content": ai_response})
-                    conversation_history[conv_key] = history
 
                     # Keep only last 20 messages (10 exchanges) to avoid token limits
-                    if len(conversation_history[conv_key]) > 20:
-                        conversation_history[conv_key] = conversation_history[conv_key][-20:]
+                    if len(history) > 20:
+                        history = history[-20:]
+
+                    # Save to persistent storage
+                    memory.save_conversation(conv_key, history)
 
                     # Send AI response back to Slack (in main channel)
                     await slack.send_message(
@@ -222,8 +220,8 @@ async def handle_slack_webhook(
                     # Create conversation key (use channel since we're not threading)
                     conv_key = f"{channel}:main"
 
-                    # Get existing conversation history
-                    history = conversation_history.get(conv_key, [])
+                    # Load conversation history from persistent storage
+                    history = memory.load_conversation(conv_key)
 
                     # Process mention with AI
                     ai_response = await ai_engine.process_message(text, conversation_history=history)
@@ -231,11 +229,13 @@ async def handle_slack_webhook(
                     # Update conversation history
                     history.append({"role": "user", "content": text})
                     history.append({"role": "assistant", "content": ai_response})
-                    conversation_history[conv_key] = history
 
                     # Keep only last 20 messages
-                    if len(conversation_history[conv_key]) > 20:
-                        conversation_history[conv_key] = conversation_history[conv_key][-20:]
+                    if len(history) > 20:
+                        history = history[-20:]
+
+                    # Save to persistent storage
+                    memory.save_conversation(conv_key, history)
 
                     await slack.send_message(
                         channel=channel,
