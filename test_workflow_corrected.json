@@ -1,0 +1,91 @@
+{
+  "name": "99acres Delhi Housing Scraper",
+  "active": false,
+  "nodes": [
+    {
+      "id": "1",
+      "name": "Start",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "parameters": {}
+    },
+    {
+      "id": "2",
+      "name": "HTTP Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [450, 300],
+      "parameters": {
+        "url": "https://www.99acres.com/search/property/buy/delhi?city=1075722&preference=S&area_unit=1&res_com=R",
+        "method": "GET",
+        "responseFormat": "string",
+        "options": {}
+      }
+    },
+    {
+      "id": "3",
+      "name": "Parse HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300],
+      "parameters": {
+        "jsCode": "const cheerio = require('cheerio');\nconst html = items[0].json.body;\nconst $ = cheerio.load(html);\n\nconst listings = [];\n$('.srpItem').each((i, el) => {\n  const price = $(el).find('.price').text().trim();\n  const area = $(el).find('.area').text().trim();\n  const amenities = $(el).find('.amenities').text().trim();\n  const bedrooms = $(el).find('.beds').text().trim();\n  listings.push({ json: { price, area, amenities, bedrooms } });\n});\n\nreturn listings;"
+      }
+    },
+    {
+      "id": "4",
+      "name": "Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [850, 300],
+      "parameters": {
+        "operation": "append",
+        "documentId": "1WA3NtBgi8DYhs-gKRnSeEuvv-72WQtVqXutB8UV9b9c",
+        "sheetName": "Sheet1",
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "PLACEHOLDER",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Parse HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse HTML": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

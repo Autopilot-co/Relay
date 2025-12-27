@@ -122,16 +122,80 @@ Available functions:
 
 WORKFLOW GENERATION - n8n JSON Format:
 
-When I call create_workflow, I will ask you to generate valid n8n JSON. Use this structure:
+When I call create_workflow, I will ask you to generate valid n8n JSON.
 
+CRITICAL JSON FORMATTING RULES:
+- Return ONLY valid JSON (no markdown, no explanations)
+- NO literal newlines in strings - use \\n for line breaks
+- NO line breaks in URLs or string values
+- Keep string values on single lines
+- Use proper escaping: quotes as \\" and newlines as \\n
+
+Node Types & TypeVersions (use current versions):
+- manualTrigger (v1) - Manual trigger button
+- scheduleTrigger (v1) - Cron/interval scheduling
+- webhook (v1) - Receive HTTP requests
+- httpRequest (v4) - Make HTTP API calls
+- code (v2) - JavaScript code execution (replaces old "function" node)
+- if (v2) - Conditional branching
+- set (v3) - Manipulate data
+- googleSheets (v4) - Google Sheets operations
+- respondToWebhook (v1) - Send webhook response
+
+Code Node Syntax (IMPORTANT):
+- Access input data: items[0].json.fieldName (NOT $node["PreviousNode"].json)
+- Return format: return items.map(item => ({json: {...}}));
+- Multi-line code: use \\n, not actual newlines
+
+Example Valid Workflow:
 {
-  "name": "Workflow Name",
-  "nodes": [{"id": "node-1", "name": "Node Name", "type": "n8n-nodes-base.nodeType", "typeVersion": 1, "position": [250, 300], "parameters": {}}],
-  "connections": {"Node Name": {"main": [[{"node": "Next Node", "type": "main", "index": 0}]]}},
-  "active": false
+  "name": "Daily API Monitor",
+  "active": false,
+  "nodes": [
+    {
+      "id": "1",
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "hours", "hoursInterval": 1}]
+        }
+      }
+    },
+    {
+      "id": "2",
+      "name": "Check API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [450, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.example.com/status",
+        "options": {}
+      }
+    },
+    {
+      "id": "3",
+      "name": "Process Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300],
+      "parameters": {
+        "jsCode": "const status = items[0].json.status;\\nconst uptime = items[0].json.uptime;\\nreturn [{json: {status, uptime, timestamp: new Date().toISOString()}}];"
+      }
+    }
+  ],
+  "connections": {
+    "Every Hour": {
+      "main": [[{"node": "Check API", "type": "main", "index": 0}]]
+    },
+    "Check API": {
+      "main": [[{"node": "Process Response", "type": "main", "index": 0}]]
+    }
+  }
 }
-
-Common node types: scheduleTrigger, webhook, httpRequest, code, if, set, respondToWebhook
 
 Example conversation:
 User: "show me my workflows"
