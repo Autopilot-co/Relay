@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from config.settings import settings
 from utils.logger import logger
 from webhooks.slack_webhook import handle_slack_webhook
+from core.ai_engine import ai_engine
 
 # Log that we're starting up
 logger.info(f"Initializing {settings.app_name}...")
@@ -20,6 +21,22 @@ app = FastAPI(
 )
 
 logger.info(f"{settings.app_name} initialized successfully")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize MCP connection on application startup"""
+    logger.info("Running startup tasks...")
+
+    # Initialize MCP (Model Context Protocol) for n8n access
+    success = await ai_engine.initialize_mcp()
+
+    if success:
+        logger.info("✅ MCP initialized successfully")
+    else:
+        logger.warning("⚠️ MCP initialization failed - n8n features may be limited")
+
+    logger.info("Startup complete")
 
 
 @app.get("/health")

@@ -1,13 +1,15 @@
 """
 Relay - AI Engine
 Handles all AI/LLM interactions using Cerebras (via OpenAI SDK)
+Integrates with MCP (Model Context Protocol) for n8n access
 """
 
 import logging
-import re
-from typing import AsyncGenerator, Optional, Tuple
+import json
+from typing import AsyncGenerator, Optional, Any
 from openai import AsyncOpenAI
 from config.settings import settings
+from core.mcp_client import mcp_manager
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +38,48 @@ class AIEngine:
         self.max_tokens = 4096
         self.temperature = 0.7
 
+        # MCP initialization flag
+        self.mcp_initialized = False
+
         logger.info(f"AI Engine initialized with model: {self.model}")
+
+    async def initialize_mcp(self) -> bool:
+        """
+        Initialize MCP connection to n8n (and other platforms)
+
+        Should be called once during application startup
+
+        Returns:
+            True if MCP initialized successfully
+        """
+        if self.mcp_initialized:
+            return True
+
+        try:
+            # Connect to n8n MCP server if configured
+            if settings.n8n_mcp_url:
+                logger.info(f"Connecting to n8n MCP server: {settings.n8n_mcp_url}")
+                success = await mcp_manager.add_server("n8n", settings.n8n_mcp_url)
+
+                if success:
+                    logger.info("✅ n8n MCP connected successfully")
+                    self.mcp_initialized = True
+
+                    # Log available tools
+                    tools_desc = mcp_manager.get_tools_description()
+                    logger.info(f"MCP tools available:{tools_desc}")
+
+                    return True
+                else:
+                    logger.error("❌ Failed to connect to n8n MCP server")
+                    return False
+            else:
+                logger.warning("N8N_MCP_URL not set - MCP features disabled")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error initializing MCP: {e}")
+            return False
 
     def _get_system_prompt(self) -> str:
         """
@@ -106,19 +149,15 @@ You: "Got it! How often should this run? (hourly, daily, weekly?)"
 
 ...and so on until you have all info, THEN build the workflow.
 
-Function calling format:
-When you need to call an n8n function, use this format in your response:
-[CALL:function_name:param1:param2]
+Function calling:
+You have access to n8n tools via MCP (Model Context Protocol). Use the provided tools to:
+- List and inspect workflows
+- Get execution history and analyze errors
+- Activate/deactivate workflows
+- Create new workflows
 
-Available functions:
-- [CALL:list_workflows] - List all workflows
-- [CALL:list_workflows:active] - List only active workflows
-- [CALL:get_workflow:WORKFLOW_ID] - Get specific workflow details
-- [CALL:get_executions] - Get recent executions (all workflows)
-- [CALL:get_executions:WORKFLOW_ID] - Get executions for specific workflow
-- [CALL:activate_workflow:WORKFLOW_ID] - Activate a workflow
-- [CALL:deactivate_workflow:WORKFLOW_ID] - Deactivate a workflow
-- [CALL:create_workflow:DESCRIPTION] - Create new workflow (use after gathering ALL requirements)
+When you need to interact with n8n, simply call the appropriate tool using function calling.
+The AI system will automatically handle the MCP communication.
 
 WORKFLOW GENERATION - n8n JSON Format:
 
@@ -199,17 +238,13 @@ Example Valid Workflow:
 
 Example conversation:
 User: "show me my workflows"
-You: "Let me check your workflows for you. [CALL:list_workflows]"
+You: "Let me check your workflows for you." [calls n8n_list_workflows tool]
 
 User: "why did workflow X fail?"
-You: "Let me check the execution history. [CALL:get_executions:X]"
+You: "Let me check the execution history for workflow X." [calls n8n_get_executions tool]
 
 User: "build a workflow to send me daily reports"
-You: "I can help with that! A few questions first:
-- What kind of reports? (sales, analytics, system status, etc.)
-- What data source should I pull from?
-- What time should they send?
-- Where should I send them? (email, slack, etc.)"
+You: "Perfect! Let me start by understanding your requirements. What kind of reports would you like? (sales, analytics, system status, etc.)"
 
 Communication style:
 - Use emojis sparingly for status (✅ ❌ ⚠️ 🔍)
@@ -219,202 +254,43 @@ Communication style:
 
 Remember: You're a DevOps engineer teammate who happens to work in Slack, not a chatbot."""
 
-    def _parse_function_calls(self, text: str) -> list[Tuple[str, str, list[str]]]:
+    async def _execute_mcp_tool(self, tool_name: str, arguments: dict) -> str:
         """
-        Parse function call markers from AI response
-
-        Format: [CALL:function_name:param1:param2]
-
-        Returns:
-            List of tuples: (full_match, function_name, [params])
-        """
-        pattern = r'\[CALL:([^\]]+)\]'
-        matches = re.finditer(pattern, text)
-
-        calls = []
-        for match in matches:
-            full_match = match.group(0)
-            call_parts = match.group(1).split(':')
-            function_name = call_parts[0]
-            params = call_parts[1:] if len(call_parts) > 1 else []
-            calls.append((full_match, function_name, params))
-
-        return calls
-
-    async def _execute_function_call(self, function_name: str, params: list[str]) -> str:
-        """
-        Execute an n8n function call and return formatted result
+        Execute an MCP tool and return formatted result
 
         Args:
-            function_name: Name of the function to call
-            params: List of parameters for the function
+            tool_name: Name of the tool to call (e.g., "n8n_list_workflows")
+            arguments: Dictionary of arguments for the tool
 
         Returns:
-            Formatted string with function results
+            Formatted string with tool results
         """
-        # Import here to avoid circular dependency
-        from core.n8n_client import n8n_client
-
         try:
-            # List all workflows
-            if function_name == "list_workflows":
-                active_only = len(params) > 0 and params[0] == "active"
-                workflows = await n8n_client.list_workflows(active_only=active_only)
+            # Extract server name from tool name (format: server_toolname)
+            parts = tool_name.split("_", 1)
+            if len(parts) != 2:
+                return f"\n❌ Invalid tool name format: {tool_name}"
 
-                if not workflows:
-                    return "\n📋 No workflows found."
+            server_name, tool_function = parts
 
-                result = f"\n📋 **Your Workflows** ({len(workflows)} total):\n"
-                for wf in workflows:
-                    status = "✅ Active" if wf.get("active") else "⚪ Inactive"
-                    name = wf.get("name", "Unnamed")
-                    wf_id = wf.get("id", "unknown")
-                    result += f"  • {name} - {status} (ID: {wf_id})\n"
+            logger.info(f"Calling MCP tool: {server_name}.{tool_function} with args: {arguments}")
 
-                return result
+            # Call the MCP tool
+            result = await mcp_manager.call_tool(server_name, tool_function, arguments)
 
-            # Get specific workflow
-            elif function_name == "get_workflow":
-                if not params:
-                    return "\n❌ Error: Missing workflow ID"
+            if "error" in result:
+                error_msg = result.get("error", {}).get("message", str(result.get("error")))
+                logger.error(f"MCP tool error: {error_msg}")
+                return f"\n❌ Error: {error_msg}"
 
-                workflow_id = params[0]
-                workflow = await n8n_client.get_workflow(workflow_id)
-
-                if not workflow:
-                    return f"\n❌ Workflow {workflow_id} not found"
-
-                name = workflow.get("name", "Unnamed")
-                active = "✅ Active" if workflow.get("active") else "⚪ Inactive"
-                nodes_count = len(workflow.get("nodes", []))
-
-                result = f"\n📄 **Workflow: {name}**\n"
-                result += f"  • Status: {active}\n"
-                result += f"  • Nodes: {nodes_count}\n"
-                result += f"  • ID: {workflow_id}\n"
-
-                return result
-
-            # Get executions
-            elif function_name == "get_executions":
-                workflow_id = params[0] if params else None
-                executions = await n8n_client.get_executions(workflow_id=workflow_id, limit=10)
-
-                if not executions:
-                    return "\n📊 No executions found."
-
-                result = f"\n📊 **Recent Executions** ({len(executions)} shown):\n"
-                for exe in executions[:5]:  # Show top 5
-                    status = exe.get("status", "unknown")
-                    status_icon = "✅" if status == "success" else "❌" if status == "error" else "⏸️"
-                    wf_name = exe.get("workflowName", "Unknown workflow")
-                    started = exe.get("startedAt", "Unknown time")
-
-                    result += f"  {status_icon} {wf_name} - {status}\n"
-                    result += f"     Started: {started}\n"
-
-                    if status == "error" and exe.get("error"):
-                        error_msg = exe.get("error", {}).get("message", "Unknown error")
-                        result += f"     Error: {error_msg[:100]}...\n"
-
-                return result
-
-            # Activate workflow
-            elif function_name == "activate_workflow":
-                if not params:
-                    return "\n❌ Error: Missing workflow ID"
-
-                workflow_id = params[0]
-                success = await n8n_client.activate_workflow(workflow_id)
-
-                if success:
-                    return f"\n✅ Activated workflow {workflow_id}"
-                else:
-                    return f"\n❌ Failed to activate workflow {workflow_id}"
-
-            # Deactivate workflow
-            elif function_name == "deactivate_workflow":
-                if not params:
-                    return "\n❌ Error: Missing workflow ID"
-
-                workflow_id = params[0]
-                success = await n8n_client.deactivate_workflow(workflow_id)
-
-                if success:
-                    return f"\n⚪ Deactivated workflow {workflow_id}"
-                else:
-                    return f"\n❌ Failed to deactivate workflow {workflow_id}"
-
-            # Create workflow - AI generates JSON
-            elif function_name == "create_workflow":
-                if not params:
-                    return "\n❌ Error: Missing workflow description"
-
-                description = " ".join(params)
-
-                try:
-                    # Ask AI to generate workflow JSON
-                    import json
-                    generation_prompt = f"""Generate valid n8n workflow JSON for: {description}
-
-Return ONLY the JSON, no explanations."""
-
-                    json_response = await self.client.chat.completions.create(
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": self._get_system_prompt()},
-                            {"role": "user", "content": generation_prompt}
-                        ],
-                        max_completion_tokens=self.max_tokens,
-                        temperature=0.3,
-                        stream=False
-                    )
-
-                    workflow_json_text = json_response.choices[0].message.content
-
-                    # Extract JSON
-                    if "```json" in workflow_json_text:
-                        workflow_json_text = workflow_json_text.split("```json")[1].split("```")[0].strip()
-                    elif "```" in workflow_json_text:
-                        workflow_json_text = workflow_json_text.split("```")[1].split("```")[0].strip()
-
-                    workflow_data = json.loads(workflow_json_text)
-
-                    # Create in n8n
-                    workflow = await n8n_client.create_workflow(workflow_data)
-
-                    if workflow:
-                        wf_id = workflow.get("id")
-                        wf_name = workflow.get("name")
-
-                        # Save workflow metadata to memory
-                        # Note: We don't have channel/user context here, will add later
-                        from core.memory import memory
-                        memory.save_workflow_built(
-                            workflow_id=wf_id,
-                            workflow_name=wf_name,
-                            description=description,
-                            channel="slack",  # Placeholder
-                            user="user"  # Placeholder
-                        )
-
-                        return f"\n✅ Created: {wf_name} (ID: {wf_id})\n💡 Review in n8n, add credentials, then activate!"
-                    else:
-                        return "\n❌ Failed to create workflow in n8n"
-
-                except json.JSONDecodeError as e:
-                    logger.error(f"AI generated invalid JSON: {e}")
-                    return "\n❌ AI generated invalid JSON. Try simpler workflow."
-                except Exception as e:
-                    logger.error(f"Error creating workflow: {e}")
-                    return f"\n❌ Error: {str(e)}"
-
-            else:
-                return f"\n❌ Unknown function: {function_name}"
+            # Format the result for user display
+            # The formatting depends on what the tool returns
+            # For now, return a JSON representation
+            return f"\n✅ Tool result:\n```json\n{json.dumps(result, indent=2)}\n```"
 
         except Exception as e:
-            logger.error(f"Error executing {function_name}: {e}")
-            return f"\n❌ Error executing {function_name}: {str(e)}"
+            logger.error(f"Error executing MCP tool {tool_name}: {e}")
+            return f"\n❌ Error executing {tool_name}: {str(e)}"
 
     async def process_message(
         self,
@@ -423,17 +299,21 @@ Return ONLY the JSON, no explanations."""
     ) -> str:
         """
         Process a user message and return AI response
-        Automatically executes any function calls requested by the AI
+        Automatically executes any MCP tool calls requested by the AI
 
         Args:
             user_message: The message from the user
             conversation_history: Optional list of previous messages for context
 
         Returns:
-            AI's response as a string (with function results embedded)
+            AI's response as a string (with tool results embedded)
         """
         if not self.client:
             return "Sorry, AI features are not configured. Please set CEREBRAS_API_KEY."
+
+        # Initialize MCP if not done yet
+        if not self.mcp_initialized:
+            await self.initialize_mcp()
 
         try:
             # Build messages array
@@ -450,36 +330,42 @@ Return ONLY the JSON, no explanations."""
 
             logger.info(f"Processing message: {user_message[:100]}...")
 
-            # Call Cerebras API
+            # Get MCP tools for function calling
+            tools = mcp_manager.get_all_tools_for_llm() if self.mcp_initialized else None
+
+            # Call Cerebras API with tools
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 max_completion_tokens=self.max_tokens,
                 temperature=self.temperature,
                 reasoning_effort=self.reasoning_effort,
+                tools=tools,
                 stream=False
             )
 
-            # Extract response
-            ai_response = response.choices[0].message.content
+            # Extract response message
+            message = response.choices[0].message
+            ai_response = message.content or ""
 
             logger.info(f"AI response generated ({len(ai_response)} chars)")
 
-            # Parse and execute function calls
-            function_calls = self._parse_function_calls(ai_response)
+            # Handle tool calls if present
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                logger.info(f"AI requested {len(message.tool_calls)} tool call(s)")
 
-            if function_calls:
-                logger.info(f"Found {len(function_calls)} function call(s) to execute")
+                # Execute each tool call
+                for tool_call in message.tool_calls:
+                    tool_name = tool_call.function.name
+                    tool_args = json.loads(tool_call.function.arguments)
 
-                # Execute each function call and replace in response
-                for full_match, function_name, params in function_calls:
-                    logger.info(f"Executing: {function_name}({', '.join(params)})")
+                    logger.info(f"Executing tool: {tool_name} with args: {tool_args}")
 
-                    # Execute the function
-                    result = await self._execute_function_call(function_name, params)
+                    # Execute the MCP tool
+                    result = await self._execute_mcp_tool(tool_name, tool_args)
 
-                    # Replace the marker with the result
-                    ai_response = ai_response.replace(full_match, result)
+                    # Append result to response
+                    ai_response += f"\n{result}"
 
             return ai_response
 

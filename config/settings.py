@@ -30,7 +30,12 @@ class Settings(BaseSettings):
     # n8n (will use in Step 2)
     n8n_api_url: Optional[str] = None
     n8n_api_key: Optional[str] = None
-    
+
+    # MCP (Model Context Protocol) Servers
+    n8n_mcp_url: Optional[str] = None  # URL of n8n MCP server
+    zapier_mcp_url: Optional[str] = None  # URL of Zapier MCP server (if using)
+    make_mcp_url: Optional[str] = None  # URL of Make MCP server (if using)
+
     # LLM APIs (Phase 2)
     cerebras_api_key: Optional[str] = None
     openai_api_key: Optional[str] = None
